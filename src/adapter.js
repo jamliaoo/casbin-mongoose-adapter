@@ -137,12 +137,6 @@ class MongooseAdapter {
    * @param {Object} [filter] MongoDB filter to query
    */
   async loadFilteredPolicy (model, filter) {
-    if (filter) {
-      this.setFiltered(true);
-    } else {
-      this.setFiltered(false);
-    }
-
     const lines = await CasbinRule.find(filter || {});
     for (const line of lines) {
       this.loadPolicyLine(line, model);
