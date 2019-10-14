@@ -1,6 +1,6 @@
 {
   "name": "@elastic.io/casbin-mongoose-adapter",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Mongoose adapter for Casbin",
   "main": "src/adapter.js",
   "license": "Apache-2.0",
@@ -67,8 +67,9 @@
     "mocha": "5.2.0"
   },
   "dependencies": {
-    "casbin": "2.0.0",
-    "mongoose": "5.4.2"
+    "casbin": "3.0.4",
+    "mongoose": "5.1.2",
+    "ioredis": "3.2.2"
   },
   "husky": {
     "hooks": {
