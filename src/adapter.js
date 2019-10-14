@@ -1,6 +1,8 @@
 const { Helper } = require('casbin');
 const mongoose = require('mongoose');
+const Redis = require('ioredis');
 const CasbinRule = require('./model');
+const { generateRedisKey } = require('./utils');
 
 /**
  * Implements a policy adapter for casbin with MongoDB support.
@@ -20,7 +22,7 @@ class MongooseAdapter {
    * const adapter = new MongooseAdapter('MONGO_URI');
    * const adapter = new MongooseAdapter('MONGO_URI', { mongoose_options: 'here' })
    */
-  constructor (uri, options = {}) {
+  constructor (uri, redisOptions, options = {}) {
     if (!uri || typeof uri !== 'string') {
       throw new Error('You must provide Mongo URI to connect to!');
     }
@@ -31,6 +33,13 @@ class MongooseAdapter {
     mongoose.connect(uri, options).then(instance => {
       this.mongoseInstance = instance;
     });
+
+    if (redisOptions && redisOptions.host && redisOptions.port) {
+      this.redisClient = new Redis({
+        host: redisOptions.host,
+        port: redisOptions.port,
+      });
+    }
   }
 
   /**
@@ -129,6 +138,62 @@ class MongooseAdapter {
     return this.loadFilteredPolicy(model);
   }
 
+  async fetchFromRedis (by = {}, filter = {}) {
+    let key = null;
+    let result = null;
+    const { userId, organizationId } = by;
+    const { v0, v3 } = filter;
+    if (!this.redisClient) return [key, result];
+    if (v0 &&
+      v0.$in &&
+      Array.isArray(v0.$in) &&
+      generateRedisKey('userId', userId)
+    ) {
+      key = generateRedisKey('userId', userId);
+      result = await this.redisClient.get(key);
+    } else if (v3 && v3.organizationId && generateRedisKey('organizationId', organizationId)) {
+      key = generateRedisKey('organizationId', organizationId);
+      result = await this.redisClient.get(key);
+    }
+    return [key, result];
+  }
+
+  fetchFromDb (filter) {
+    return CasbinRule.find(filter);
+  }
+
+  async fetchPolicy (by, filter) {
+    let lines = [];
+    const [key, result] = await this.fetchFromRedis(by, filter);
+    if (result) {
+      lines = JSON.parse(result);
+    } else {
+      lines = await this.fetchFromDb(filter);
+      if (key && this.redisClient)
+        await this.redisClient.set(key, JSON.stringify(lines), 'EX', 15 * 60);
+    }
+    return lines;
+  }
+
+  clearCache () {
+    if (!this.redisClient) return;
+    const stream = this.redisClient.scanStream({
+      match: 'casbin*'
+    });
+    const pipeline = this.redisClient.pipeline();
+    stream.on('data', keys => {
+      // `keys` is an array of strings representing key names
+      if (keys.length > 0) {
+        keys.forEach(key => {
+          pipeline.del(key);
+        });
+      }
+    });
+    stream.on('end', () => {
+      pipeline.exec();
+    });
+  }
+
   /**
    * Loads partial policy based on filter criteria.
    * This method is used by casbin and should not be called by user.
@@ -136,8 +201,10 @@ class MongooseAdapter {
    * @param {Model} model Enforcer model
    * @param {Object} [filter] MongoDB filter to query
    */
-  async loadFilteredPolicy (model, filter) {
-    const lines = await CasbinRule.find(filter || {});
+  async loadFilteredPolicy (model, query = {}) {
+    const { by, filter } = query;
+    if (!filter) return;
+    const lines = await this.fetchPolicy(by, filter);
     for (const line of lines) {
       this.loadPolicyLine(line, model);
     }
@@ -219,6 +286,7 @@ class MongooseAdapter {
    * @returns {Promise<void>}
    */
   async addPolicy (sec, ptype, rule) {
+    this.clearCache();
     const line = this.savePolicyLine(ptype, rule);
     await line.save();
   }
@@ -233,6 +301,7 @@ class MongooseAdapter {
    * @returns {Promise<void>}
    */
   async removePolicy (sec, ptype, rule) {
+    this.clearCache();
     const { p_type, v0, v1, v2, v3, v4, v5 } = this.savePolicyLine(ptype, rule);
     await CasbinRule.deleteMany({ p_type, v0, v1, v2, v3, v4, v5 });
   }
